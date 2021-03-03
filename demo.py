@@ -1,3 +1,4 @@
+import abc
 import os
 from typing import List, Dict, ContextManager, Optional
 import tempfile
@@ -52,7 +53,35 @@ class Inode:
         self.size_lock = Lock()
 
 
-class Mount:
+class Mount(metaclass=abc.ABCMeta):
+    ident: str
+
+    @abc.abstractmethod
+    def lookup(self, inode: Inode, name: str) -> Optional[str]:
+        pass
+
+    @abc.abstractmethod
+    def readdir(self, inode: Inode) -> List[str]:
+        pass
+
+    @abc.abstractmethod
+    def load(self, ident: str) -> Inode:
+        pass
+
+    @abc.abstractmethod
+    def create_file(self, inode: Inode, name: str) -> str:
+        pass
+
+    @abc.abstractmethod
+    def read(self, inode: Inode, offset: int, length: int) -> bytes:
+        pass
+
+    @abc.abstractmethod
+    def write(self, inode: Inode, offset: int, data: bytes) -> int:
+        pass
+
+
+class HostMount(Mount):
     def __init__(self, ident: str, root_path: str):
         self.ident = ident
         self.root_path = root_path
@@ -66,7 +95,6 @@ class Mount:
         return None
 
     def readdir(self, inode: Inode) -> List[str]:
-        assert inode.is_dir
         return os.readdir(inode.data['host_path'])
 
     def load(self, ident: str) -> Inode:
@@ -93,18 +121,81 @@ class Mount:
         return host_path
 
     def read(self, inode: Inode, offset: int, length: int) -> bytes:
-        random_sleep()
         with open(inode.data['host_path'], 'rb') as f:
             f.seek(offset)
             return f.read(length)
 
     def write(self, inode: Inode, offset: int, data: bytes) -> int:
-        random_sleep()
         with open(inode.data['host_path'], 'r+b') as f:
             f.seek(offset)
             result = f.write(data)
         return result
 
+
+class MemMount(Mount):
+    def __init__(self, ident: str):
+        self.ident = ident
+        self.counter = 1
+        self.files: dict = {
+            '0': {}
+        }
+        self.lock = Lock()
+        self.root_inode = self.load('0')
+
+    def lookup(self, inode: Inode, name: str) -> Optional[str]:
+        with self.lock:
+            f = self.files[inode.ident]
+            assert isinstance(f, dict)
+            return f.get(name)
+
+    def readdir(self, inode: Inode):
+        with self.lock:
+            f = self.files[inode.ident]
+            assert isinstance(f, dict)
+            return list(f.keys())
+
+    def load(self, ident: str) -> Inode:
+        with self.lock:
+            f = self.files[ident]
+            if isinstance(f, dict):
+                size = 0
+                is_dir = True
+            else:
+                size = len(f)
+                is_dir = False
+            return Inode(
+                ident=ident,
+                size=size,
+                is_dir=is_dir,
+                data={},
+                mount=self
+            )
+
+    def create_file(self, inode: Inode, name: str) -> str:
+        with self.lock:
+            f = self.files[inode.ident]
+            assert isinstance(f, dict)
+            assert name not in f
+            ident = str(self.counter)
+            self.counter += 1
+            f[name] = ident
+            self.files[ident] = bytearray()
+            return ident
+
+    def read(self, inode: Inode, pos: int, length: int) -> bytes:
+        with self.lock:
+            f = self.files[inode.ident]
+            assert isinstance(f, bytearray)
+            return bytes(f[pos:pos+length])
+
+    def write(self, inode: Inode, pos: int, data: bytes) -> int:
+        with self.lock:
+            f = self.files[inode.ident]
+            assert isinstance(f, bytearray)
+            if len(f) < pos:
+                f.extend(b'\x00' * (pos - len(f)))
+            f[pos:pos+len(data)] = data
+            return len(data)
 
 @dataclass
 class Handle:
@@ -184,9 +275,9 @@ class FS:
         return handle, fd
 
     def put_handle(self, handle):
-        logging.info(f'put_handle: {handle.inode.host_path}')
+        logging.info(f'put_handle: {handle.inode.ident}')
         if handle.ref_count.dec():
-            logging.info(f'delete_handle: {handle.inode.host_path}')
+            logging.info(f'delete_handle: {handle.inode.ident}')
             self.put_inode(handle.inode)
 
     @contextmanager
@@ -242,6 +333,7 @@ class FS:
         handle = self.handles[fd]
         inode = handle.inode
         with handle.pos_lock:
+            random_sleep()
             result = inode.mount.read(inode, handle.pos, length)
             handle.pos += len(result)
         return result
@@ -264,10 +356,12 @@ class FS:
         inode = handle.inode
         if handle.append:
             with inode.size_lock:
+                random_sleep()
                 result = inode.mount.write(inode, inode.size, data)
                 inode.size += result
         else:
             with handle.pos_lock:
+                random_sleep()
                 result = inode.mount.write(inode, handle.pos, data)
                 handle.pos += result
                 with inode.size_lock:
@@ -309,14 +403,14 @@ def main():
     logging.basicConfig(level=logging.INFO, format='[%(threadName)s] %(message)s')
 
     with tempfile.TemporaryDirectory() as d:
-        mount = Mount('root', d)
+        mount = MemMount('root')
         fs = FS(mount)
 
-        repeat(writer, [fs], 1)
+        repeat(writer, [fs], 2)
 
         fd = fs.open('/log.txt')
         fs.seek(fd, fs.stat('/log.txt')['size'])
-        repeat(writer_fd, [fs, fd], 1)
+        repeat(writer_fd, [fs, fd], 2)
 
         fd = fs.open('/log.txt')
         result = fs.read(fd, 4096)
