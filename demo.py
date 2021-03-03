@@ -1,14 +1,13 @@
 import abc
-import os
-from typing import List, Dict, ContextManager, Optional
-import tempfile
 import logging
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from functools import wraps
-import time
-from threading import Lock, Thread
+import os
 import random
+import tempfile
+import time
+from contextlib import contextmanager
+from functools import wraps
+from threading import Lock, Thread
+from typing import ContextManager, Dict, List, Optional
 
 # from client import Client, LocalClient, Object
 
@@ -48,6 +47,7 @@ class Inode:
         self.size = size
         self.data = data
         self.mount = mount
+        self.mount_here: Optional['Mount'] = None
 
         self.ref_count = RefCount()
         self.size_lock = Lock()
@@ -55,6 +55,7 @@ class Inode:
 
 class Mount(metaclass=abc.ABCMeta):
     ident: str
+    root_inode: Inode
 
     @abc.abstractmethod
     def lookup(self, inode: Inode, name: str) -> Optional[str]:
@@ -70,6 +71,10 @@ class Mount(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def create_file(self, inode: Inode, name: str) -> str:
+        pass
+
+    @abc.abstractmethod
+    def create_dir(self, inode: Inode, name: str) -> str:
         pass
 
     @abc.abstractmethod
@@ -95,7 +100,7 @@ class HostMount(Mount):
         return None
 
     def readdir(self, inode: Inode) -> List[str]:
-        return os.readdir(inode.data['host_path'])
+        return os.listdir(inode.data['host_path'])
 
     def load(self, ident: str) -> Inode:
         host_path = ident
@@ -118,6 +123,11 @@ class HostMount(Mount):
         host_path = inode.data['host_path'] + '/' + name
         with open(host_path, 'wb') as f:
             pass
+        return host_path
+
+    def create_dir(self, inode: Inode, name: str) -> str:
+        host_path = inode.data['host_path'] + '/' + name
+        os.mkdir(host_path)
         return host_path
 
     def read(self, inode: Inode, offset: int, length: int) -> bytes:
@@ -171,7 +181,7 @@ class MemMount(Mount):
                 mount=self
             )
 
-    def create_file(self, inode: Inode, name: str) -> str:
+    def _create(self, inode: Inode, name: str, initial) -> str:
         with self.lock:
             f = self.files[inode.ident]
             assert isinstance(f, dict)
@@ -179,8 +189,14 @@ class MemMount(Mount):
             ident = str(self.counter)
             self.counter += 1
             f[name] = ident
-            self.files[ident] = bytearray()
+            self.files[ident] = initial
             return ident
+
+    def create_file(self, inode: Inode, name: str) -> str:
+        return self._create(inode, name, bytearray())
+
+    def create_dir(self, inode: Inode, name: str):
+        return self._create(inode, name, {})
 
     def read(self, inode: Inode, pos: int, length: int) -> bytes:
         with self.lock:
@@ -197,14 +213,18 @@ class MemMount(Mount):
             f[pos:pos+len(data)] = data
             return len(data)
 
-@dataclass
-class Handle:
-    inode: Inode
-    pos: int
-    append: bool
 
-    ref_count: RefCount = field(default_factory=RefCount)
-    pos_lock: Lock = field(default_factory=Lock)
+class Handle:
+    def __init__(
+        self,
+        inode: Inode,
+        append: bool
+    ):
+        self.inode = inode
+        self.append = append
+        self.pos = 0
+        self.ref_count = RefCount()
+        self.pos_lock = Lock()
 
 
 def trace(method):
@@ -223,50 +243,61 @@ def trace(method):
     return wrapped
 
 
+class InodeCache:
+    def __init__(self):
+        self.inodes: Dict[str, Inode] = {}
+        self.lock = Lock()
+
+    def add(self, inode):
+        key = (inode.mount.ident, inode.ident)
+        with self.lock:
+            assert key not in self.inodes
+            self.inodes[key] = inode
+
+    def inc(self, inode):
+        inode.ref_count.inc()
+
+    def dec(self, inode):
+        with self.lock:
+            if inode.ref_count.dec():
+                key = (inode.mount.ident, inode.ident)
+                del self.inodes[key]
+
+    def get(self, mount, ident):
+        with self.lock:
+            return self.inodes.get((mount.ident, ident))
+
+
 class FS:
     def __init__(self, root_mount: Mount):
         self.root_mount = root_mount
         self.root_inode = root_mount.root_inode
 
-        self.inodes: Dict[str, str] = {}
+        self.inode_cache = InodeCache()
         self.handles: Dict[int, Handle] = {}
         self.global_lock = Lock()
 
-        self.inodes[(root_mount.ident, root_mount.root_inode.ident)] = root_mount.root_inode
-        root_mount.root_inode.ref_count.inc()
+        self.inode_cache.add(root_mount.root_inode)
+        self.mounts = {root_mount.ident: root_mount}
 
     def find_inode(self, mount: Mount, ident: str):
         logging.info(f'find_inode: {ident}')
         with self.global_lock:
-            if (mount.ident, ident) in self.inodes:
-                inode = self.inodes[(mount.ident, ident)]
-                self.get_inode(inode)
+            inode = self.inode_cache.get(mount, ident)
+            if inode:
+                self.inode_cache.inc(inode)
             else:
-                inode = self.create_inode(mount, ident)
-        return inode
-
-    def get_inode(self, inode: Inode):
-        logging.info(f'get_inode: {inode.ident}')
-        inode.ref_count.inc()
-
-    def put_inode(self, inode: Inode):
-        logging.info(f'put_inode: {inode.ident}')
-        with self.global_lock:
-            if inode.ref_count.dec():
-                logging.info(f'delete_inode: {inode.ident}')
-                del self.inodes[(inode.mount.ident, inode.ident)]
-
-    def create_inode(self, mount: Mount, ident: str):
-        logging.info(f'create_inode: {ident}')
-        inode = mount.load(ident)
-        self.inodes[(mount.ident, ident)] = inode
+                inode = mount.load(ident)
+                self.inode_cache.add(inode)
         return inode
 
     def create_handle(self, inode, append):
         logging.info(f'create_handle: {inode.ident}')
-        self.get_inode(inode)
+        self.inode_cache.inc(inode)
         handle = Handle(
-            inode=inode, append=append, pos=0)
+            inode=inode,
+            append=append
+        )
         with self.global_lock:
             fd = 0
             while fd in self.handles:
@@ -278,17 +309,25 @@ class FS:
         logging.info(f'put_handle: {handle.inode.ident}')
         if handle.ref_count.dec():
             logging.info(f'delete_handle: {handle.inode.ident}')
-            self.put_inode(handle.inode)
+            self.inode_cache.dec(handle.inode)
+
+    def _traverse_mount(self, inode: Inode):
+        if inode.mount_here:
+            self.inode_cache.dec(inode)
+            inode = inode.mount_here.root_inode
+            self.inode_cache.inc(inode)
+        return inode
 
     @contextmanager
-    def lookup(self, path: str, create: bool = False) -> ContextManager[Inode]:
+    def find(self, path: str, create: bool = False) -> ContextManager[Inode]:
         if path == '/':
             names = []
         else:
             names = path.lstrip('/').split('/')
 
         inode = self.root_inode
-        self.get_inode(inode)
+        self.inode_cache.inc(inode)
+        inode = self._traverse_mount(inode)
         for i, name in enumerate(names):
             try:
                 next_ident = inode.mount.lookup(inode, name)
@@ -296,25 +335,35 @@ class FS:
                     if create and i == len(names) - 1:
                         next_ident = inode.mount.create_file(inode, name)
                     else:
-                        raise Exception(f'Lookup {name} failed')
+                        raise Exception(f'Lookup {name!r} failed')
             finally:
-                self.put_inode(inode)
+                self.inode_cache.dec(inode)
 
             inode = self.find_inode(inode.mount, next_ident)
+            inode = self._traverse_mount(inode)
 
         try:
             yield inode
         finally:
-            self.put_inode(inode)
+            self.inode_cache.dec(inode)
+
+    @trace
+    def mount(self, path: str, mount: Mount) -> None:
+        with self.find(path) as inode:
+            with self.global_lock:
+                self.mounts[mount.ident] = mount
+                inode.mount_here = mount
+                self.inode_cache.inc(inode)
+                self.inode_cache.add(mount.root_inode)
 
     @trace
     def readdir(self, path: str) -> List[str]:
-        with self.lookup(path) as inode:
+        with self.find(path) as inode:
             return inode.mount.readdir(inode)
 
     @trace
     def stat(self, path: str) -> dict:
-        with self.lookup(path) as inode:
+        with self.find(path) as inode:
             if inode.is_dir:
                 return {'type': 'dir'}
             else:
@@ -323,7 +372,7 @@ class FS:
 
     @trace
     def open(self, path: str, create=False, append=False) -> int:
-        with self.lookup(path, create=create) as inode:
+        with self.find(path, create=create) as inode:
             assert not inode.is_dir
             handle, fd = self.create_handle(inode, append)
             return fd
@@ -375,6 +424,14 @@ class FS:
             del self.handles[fd]
         self.put_handle(handle)
 
+    @trace
+    def mkdir(self, path):
+        parent, _, name = path.rpartition('/')
+        if parent == '':
+            parent = '/'
+        with self.find(parent) as inode:
+            inode.mount.create_dir(inode, name)
+
 
 def writer(fs):
     fd = fs.open('/log.txt', create=True, append=True)
@@ -403,8 +460,13 @@ def main():
     logging.basicConfig(level=logging.INFO, format='[%(threadName)s] %(message)s')
 
     with tempfile.TemporaryDirectory() as d:
-        mount = MemMount('root')
+        mount = MemMount('mem')
         fs = FS(mount)
+
+        fs.mkdir('/host')
+
+        mount2 = HostMount('host', d)
+        fs.mount('/host', mount2)
 
         repeat(writer, [fs], 2)
 
