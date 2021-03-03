@@ -1,9 +1,9 @@
 import os
-from typing import List, Dict, ContextManager
+from typing import List, Dict, ContextManager, Optional
 import tempfile
 import logging
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 import time
 from threading import Lock, Thread
@@ -33,15 +33,77 @@ class RefCount:
             return self.value == 0
 
 
-@dataclass
 class Inode:
-    host_path: str
-    is_dir: bool
-    entries: Dict[str, str]
-    size: int
+    def __init__(
+        self,
+        ident: str,
+        is_dir: bool,
+        size: int,
+        data: dict,
+        mount: 'Mount',
+    ):
+        self.ident = ident
+        self.is_dir = is_dir
+        self.size = size
+        self.data = data
+        self.mount = mount
 
-    ref_count: RefCount
-    size_lock: Lock
+        self.ref_count = RefCount()
+        self.size_lock = Lock()
+
+
+class Mount:
+    def __init__(self, ident: str, root_path: str):
+        self.ident = ident
+        self.root_path = root_path
+        self.root_inode = self.load(root_path)
+
+    def lookup(self, inode: Inode, name: str) -> Optional[str]:
+        host_path = inode.data['host_path'] + '/' + name
+        if os.path.exists(host_path):
+            return host_path
+
+        return None
+
+    def readdir(self, inode: Inode) -> List[str]:
+        assert inode.is_dir
+        return os.readdir(inode.data['host_path'])
+
+    def load(self, ident: str) -> Inode:
+        host_path = ident
+        if os.path.isdir(host_path):
+            size = 0
+            is_dir = True
+        else:
+            size = os.stat(host_path).st_size
+            is_dir = False
+        inode = Inode(
+            ident=ident,
+            size=size,
+            is_dir=is_dir,
+            data={'host_path': host_path},
+            mount=self
+        )
+        return inode
+
+    def create_file(self, inode: Inode, name: str) -> str:
+        host_path = inode.data['host_path'] + '/' + name
+        with open(host_path, 'wb') as f:
+            pass
+        return host_path
+
+    def read(self, inode: Inode, offset: int, length: int) -> bytes:
+        random_sleep()
+        with open(inode.data['host_path'], 'rb') as f:
+            f.seek(offset)
+            return f.read(length)
+
+    def write(self, inode: Inode, offset: int, data: bytes) -> int:
+        random_sleep()
+        with open(inode.data['host_path'], 'r+b') as f:
+            f.seek(offset)
+            result = f.write(data)
+        return result
 
 
 @dataclass
@@ -50,8 +112,8 @@ class Handle:
     pos: int
     append: bool
 
-    ref_count: RefCount
-    pos_lock: Lock
+    ref_count: RefCount = field(default_factory=RefCount)
+    pos_lock: Lock = field(default_factory=Lock)
 
 
 def trace(method):
@@ -71,59 +133,49 @@ def trace(method):
 
 
 class FS:
-    def __init__(self, root_path: str):
-        self.root_path = root_path
+    def __init__(self, root_mount: Mount):
+        self.root_mount = root_mount
+        self.root_inode = root_mount.root_inode
 
         self.inodes: Dict[str, str] = {}
         self.handles: Dict[int, Handle] = {}
         self.global_lock = Lock()
 
-    def find_inode(self, host_path: str):
-        logging.info(f'find_inode: {host_path}')
+        self.inodes[(root_mount.ident, root_mount.root_inode.ident)] = root_mount.root_inode
+        root_mount.root_inode.ref_count.inc()
+
+    def find_inode(self, mount: Mount, ident: str):
+        logging.info(f'find_inode: {ident}')
         with self.global_lock:
-            if host_path in self.inodes:
-                inode = self.inodes[host_path]
+            if (mount.ident, ident) in self.inodes:
+                inode = self.inodes[(mount.ident, ident)]
                 self.get_inode(inode)
             else:
-                inode = self.create_inode(host_path)
+                inode = self.create_inode(mount, ident)
         return inode
 
     def get_inode(self, inode: Inode):
-        logging.info(f'get_inode: {inode.host_path}')
+        logging.info(f'get_inode: {inode.ident}')
         inode.ref_count.inc()
 
     def put_inode(self, inode: Inode):
-        logging.info(f'put_inode: {inode.host_path}')
+        logging.info(f'put_inode: {inode.ident}')
         with self.global_lock:
             if inode.ref_count.dec():
-                logging.info(f'delete_inode: {inode.host_path}')
-                del self.inodes[inode.host_path]
+                logging.info(f'delete_inode: {inode.ident}')
+                del self.inodes[(inode.mount.ident, inode.ident)]
 
-    def create_inode(self, host_path):
-        logging.info(f'create_inode: {host_path}')
-        if os.path.isdir(host_path):
-            entries = {
-                name: host_path + '/' + name
-                for name in os.listdir(host_path)
-            }
-            size = 0
-            is_dir = True
-        else:
-            entries = {}
-            size = os.stat(host_path).st_size
-            is_dir = False
-        inode = Inode(
-            host_path=host_path, entries=entries, size=size,
-            is_dir=is_dir, ref_count=RefCount(), size_lock=Lock())
-        self.inodes[host_path] = inode
+    def create_inode(self, mount: Mount, ident: str):
+        logging.info(f'create_inode: {ident}')
+        inode = mount.load(ident)
+        self.inodes[(mount.ident, ident)] = inode
         return inode
 
     def create_handle(self, inode, append):
-        logging.info(f'create_handle: {inode.host_path}')
+        logging.info(f'create_handle: {inode.ident}')
         self.get_inode(inode)
         handle = Handle(
-            inode=inode, append=append, pos=0, ref_count=RefCount(),
-            pos_lock=Lock())
+            inode=inode, append=append, pos=0)
         with self.global_lock:
             fd = 0
             while fd in self.handles:
@@ -144,24 +196,20 @@ class FS:
         else:
             names = path.lstrip('/').split('/')
 
-        host_path = self.root_path
-        inode = self.find_inode(host_path)
+        inode = self.root_inode
+        self.get_inode(inode)
         for i, name in enumerate(names):
             try:
-                if name in inode.entries:
-                    next_path = inode.entries[name]
-                elif create and i == len(names) - 1:
-                    next_path = host_path + '/' + name
-                    with open(next_path, 'w'):
-                        pass
-                    inode.entries[name] = next_path
-                else:
-                    raise Exception(f'Lookup {name} failed')
+                next_ident = inode.mount.lookup(inode, name)
+                if next_ident is None:
+                    if create and i == len(names) - 1:
+                        next_ident = inode.mount.create_file(inode, name)
+                    else:
+                        raise Exception(f'Lookup {name} failed')
             finally:
                 self.put_inode(inode)
 
-            host_path = next_path
-            inode = self.find_inode(host_path)
+            inode = self.find_inode(inode.mount, next_ident)
 
         try:
             yield inode
@@ -171,7 +219,7 @@ class FS:
     @trace
     def readdir(self, path: str) -> List[str]:
         with self.lookup(path) as inode:
-            return list(inode.entries.keys())
+            return inode.mount.readdir(inode)
 
     @trace
     def stat(self, path: str) -> dict:
@@ -192,11 +240,9 @@ class FS:
     @trace
     def read(self, fd, length):
         handle = self.handles[fd]
+        inode = handle.inode
         with handle.pos_lock:
-            with open(handle.inode.host_path, 'rb') as f:
-                f.seek(handle.pos)
-                result = f.read(length)
-            random_sleep()
+            result = inode.mount.read(inode, handle.pos, length)
             handle.pos += len(result)
         return result
 
@@ -215,21 +261,17 @@ class FS:
     @trace
     def write(self, fd, data: bytes) -> int:
         handle = self.handles[fd]
+        inode = handle.inode
         if handle.append:
-            with handle.inode.size_lock:
-                result = self.do_write(handle.inode, handle.inode.size, data)
-                handle.inode.size += result
+            with inode.size_lock:
+                result = inode.mount.write(inode, inode.size, data)
+                inode.size += result
         else:
             with handle.pos_lock:
-                result = self.do_write(handle.inode, handle.pos, data)
+                result = inode.mount.write(inode, handle.pos, data)
                 handle.pos += result
-        return result
-
-    def do_write(self, inode, pos, data):
-        with open(inode.host_path, 'r+b') as f:
-            f.seek(pos)
-            result = f.write(data)
-        random_sleep()
+                with inode.size_lock:
+                    inode.size = max(inode.size, handle.pos)
         return result
 
     @trace
@@ -267,20 +309,18 @@ def main():
     logging.basicConfig(level=logging.INFO, format='[%(threadName)s] %(message)s')
 
     with tempfile.TemporaryDirectory() as d:
-        fs = FS(d)
+        mount = Mount('root', d)
+        fs = FS(mount)
 
-        repeat(writer, [fs], 3)
+        repeat(writer, [fs], 1)
 
         fd = fs.open('/log.txt')
         fs.seek(fd, fs.stat('/log.txt')['size'])
-        repeat(writer_fd, [fs, fd], 3)
+        repeat(writer_fd, [fs, fd], 1)
 
         fd = fs.open('/log.txt')
         result = fs.read(fd, 4096)
         print(result.decode())
-
-    with tempfile.TemporaryDirectory() as d:
-        fs = FS(d)
 
 
 if __name__ == '__main__':
