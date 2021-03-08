@@ -19,28 +19,21 @@ class SyncHandle:
         self.client = client
 
     @contextmanager
-    def get(self):
+    def get_shared(self):
         with self.lock:
             if not self.valid:
-                self._load()
+                self.client.get_shared(self)
             yield
             if self.modified:
-                self._modify()
-                self.modified = False
+                if self.shared:
+                    self.client.get_exclusive(self, update=True)
 
-    def _load(self):
-        assert self.lock.locked()
-        assert not self.valid
-        self.client.load(self)
-        self.ack.wait()
-        self.valid = True
-
-    def _modify(self):
-        assert self.lock.locked()
-        assert self.valid
-        if self.shared:
-            self.client.modify(self)
-            self.ack.wait()
+    @contextmanager
+    def get_exclusive(self):
+        with self.lock:
+            if not self.valid:
+                self.client.get_exclusive(self)
+            yield
 
 
 class SyncClient(IpcClient):
@@ -51,9 +44,7 @@ class SyncClient(IpcClient):
 
         self.methods = {
             'ack': self.on_ack,
-            'share': self.on_share,
-            'unshare': self.on_unshare,
-            'unload': self.on_unload,
+            'drop': self.on_drop,
         }
 
     def handle_message(self, data):
@@ -62,49 +53,55 @@ class SyncClient(IpcClient):
             raise KeyError(f'unknown method: {method}')
         self.methods[method](*args)
 
-    def load(self, handle: SyncHandle):
+    def get_shared(self, handle: SyncHandle):
+        assert handle.lock.locked()
         with self.lock:
             self.handles[handle.key] = handle
-        self.send(['load', handle.key, handle.data])
+        handle.valid = False
+        self.send(['get', handle.key, handle.data])
+        handle.ack.wait()
 
-    def modify(self, handle: SyncHandle):
-        self.send(['modify', handle.key, handle.data])
+    def get_exclusive(self, handle: SyncHandle, update=False):
+        assert handle.lock.locked()
+        with self.lock:
+            self.handles[handle.key] = handle
+        handle.valid = False
+        self.send(['get_exclusive', handle.key, handle.data, update])
+        handle.ack.wait()
 
     def on_ack(self, key, data, shared):
         with self.lock:
             handle = self.handles[key]
 
         with handle.lock:
+            handle.valid = True
+            handle.modified = False
             handle.data = data
             handle.shared = shared
             handle.ack.notify()
 
-    def on_share(self, key):
-        with self.lock:
-            handle = self.handles[key]
-
-        with handle.lock:
-            handle.shared = True
-
-    def on_unshare(self, key):
-        with self.lock:
-            handle = self.handles[key]
-
-        with handle.lock:
-            handle.shared = False
-
-    def on_unload(self, key):
+    def on_drop(self, key):
         with self.lock:
             handle = self.handles[key]
 
         with handle.lock:
             handle.valid = False
+            handle.modified = False
+            self.send(['put', handle.key, handle.data])
 
-
+'''
 logging.basicConfig(level=logging.INFO, format='[%(threadName)s] %(message)s')
 client = SyncClient('server.sock')
 client.start()
 
-handle = SyncHandle(client, 'a', 123)
-with handle.get():
-    pass
+import time
+handle = SyncHandle(client, 'a', 0)
+
+while True:
+    with handle.get_exclusive():
+        handle.data += 1
+        handle.modified = True
+        print(handle.data)
+        time.sleep(0.5)
+    time.sleep(0.5)
+'''

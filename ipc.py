@@ -5,7 +5,7 @@ import sys
 from contextlib import closing
 import socket
 from threading import Lock, Thread
-from typing import List
+from typing import List, Dict
 
 
 class Conn(socketserver.BaseRequestHandler):
@@ -46,6 +46,7 @@ class IpcServer:
         self.socket_server = SocketServer(path, Conn)
         self.socket_server.ipc_server = self
         self.conns: List[Conn] = []
+        self.methods: Dict[str, callable] = {}
 
     def add_conn(self, conn: Conn):
         logging.info('add_conn: %s', conn)
@@ -56,7 +57,10 @@ class IpcServer:
         self.conns.remove(conn)
 
     def handle_message(self, conn: Conn, data):
-        raise NotImplementedError()
+        method, args = data[0], data[1:]
+        if method not in self.methods:
+            raise KeyError(f'unknown method: {method}')
+        self.methods[method](conn, *args)
 
     def run(self):
         logging.info('listening at %s', self.path)
