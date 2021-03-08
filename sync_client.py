@@ -20,7 +20,7 @@ Example usage:
     # Writing (without exclusive lock):
     with counter.get_shared():
         counter.data += 1
-        counter.modified = 1
+        counter.modified = True
 """
 from enum import Enum
 from threading import Lock
