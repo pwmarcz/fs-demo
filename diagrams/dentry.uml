@@ -1,0 +1,97 @@
+@startuml
+participant c1 as "client 1"
+participant s as "server"
+participant c2 as "client 2"
+
+group client 1: stat("foo.txt")
+
+  note left of c1 #white
+    We haven't seen the
+    dentry for "foo.txt",
+    so we acquire a shared
+    handle from the server.
+  end note
+
+  c1 -> s: get_shared("dentry:foo.txt")
+  s -> c1: ack("dentry:foo.txt", shared)
+  activate c1
+
+end
+
+note left of c1 #white
+  The call has returned,
+  but we keep the handle.
+end note
+
+group client 2: stat("foo.txt")
+
+  note right of c2 #white
+    Another client can also
+    request the same handle
+    in shared mode.
+  end note
+
+  c2 -> s: get_shared("dentry:foo.txt")
+  s -> c2: ack("dentry:foo.txt", shared)
+  activate c2
+
+end
+
+...
+
+group client 1: stat("foo.txt")
+
+  note left of c1 #white
+    We still hold the handle,
+    no need to call the server
+    again.
+  end note
+
+end
+
+...
+
+group client 1: truncate("foo.txt")
+
+  note left of c1 #white
+    We will change the file, so we
+    need to invalidate the dentry
+    for other clients.
+  end note
+
+  c1 -> s: get_exclusive("dentry:foo.txt")
+  deactivate c1
+
+  s -> c2: drop("dentry:foo.txt")
+  c2 -> s: put("dentry:foo.txt")
+  deactivate c2
+
+  s -> c1: ack("dentry:foo.txt", exclusive)
+  activate c1 #ffbbbb
+
+end
+
+note left of c1 #white
+  We now have the handle in exclusive
+  mode. Further modifications to the
+  file can be done without notifying
+  the server.
+end note
+
+group client 2: stat("foo.txt")
+
+  c2 -> s: get_shared("dentry:foo.txt")
+  s -> c1: drop("dentry:foo.txt")
+  c1 -> s: put("dentry:foo.txt")
+  deactivate c1
+
+  note left of c1 #white
+    Another client has requested the
+    handle, so we release it.
+  end note
+
+  s -> c2: ack("dentry:foo.txt", shared)
+  activate c2
+
+end
+@enduml

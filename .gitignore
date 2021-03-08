@@ -2,3 +2,4 @@
 .idea/
 venv/
 server.sock
+diagrams/plantuml.jar
