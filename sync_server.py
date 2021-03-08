@@ -1,14 +1,43 @@
+"""
+A server for synchronizing resources (sync handles). At a given time, a handle
+can be either
+
+* shared: loaded by possibly many clients,
+* exclusive: loaded by a single client (and blocking other clients).
+
+Client messages:
+
+* ["get", key, default_data]: The client requests resource in shared mode.
+  The server will respond by "ack" when the resource can be used.
+* ["get_exclusive", key, data, update]: The client requests resource in
+  exclusive mode. The server will respond by "ack" when the resource can be
+  used. If update is true, the data stored by handle will be updated.
+* ["put", key, data]: The client stops using resource (and reports latest
+  version of data).
+
+Server messages:
+
+* ["ack", key, data, shared]: The client is permitted to use the resource.
+* ["drop", key]: The server requests client to to unload a resource. The client
+  should respond with "put" when ready.
+"""
+
 import os
 from dataclasses import dataclass
 from threading import Lock
 import logging
-from typing import List, Any, Dict, Optional, Tuple
+from typing import List, Any, Dict, Optional
 
 from ipc import Conn, IpcServer
 
 
 @dataclass
 class Request:
+    """
+    A client request to use resource (get/get_exclusive). Can be handled
+    immediately, or queued.
+    """
+
     conn: Conn
     shared: bool
     data: Any
@@ -40,19 +69,11 @@ class SyncServerHandle:
                 request.started = True
             break
 
-    def _start_request(self, request: Request):
-        if request.shared:
-            assert self.exclusive_conn
-            self.exclusive_conn.send(['drop', self.key])
-        else:
-            if self.exclusive_conn:
-                self.exclusive_conn.send(['drop', self.key])
-            else:
-                assert self.shared_conns
-                for conn in self.shared_conns:
-                    conn.send(['drop', self.key])
-
     def _handle_request(self, request: Request):
+        """
+        Handle a request, if possible. Returns True on success.
+        """
+
         if request.shared and not self.exclusive_conn:
             assert request.conn not in self.shared_conns
             self.shared_conns.append(request.conn)
@@ -67,6 +88,23 @@ class SyncServerHandle:
             return True
 
         return False
+
+    def _start_request(self, request: Request):
+        """
+        Initiate handling a request (if immediate handling is not possible).
+        This will request other clients to drop a resource.
+        """
+
+        if request.shared:
+            assert self.exclusive_conn
+            self.exclusive_conn.send(['drop', self.key])
+        else:
+            if self.exclusive_conn:
+                self.exclusive_conn.send(['drop', self.key])
+            else:
+                assert self.shared_conns
+                for conn in self.shared_conns:
+                    conn.send(['drop', self.key])
 
     def get_shared(self, conn: Conn):
         if conn in self.shared_conns:
@@ -135,6 +173,7 @@ class SyncServer(IpcServer):
             for key, handle in self.handles.items():
                 handle.put(conn, handle.data)
         super().remove_conn(conn)
+
 
 def main():
     logging.basicConfig(level=logging.INFO, format='[%(threadName)s] %(message)s')

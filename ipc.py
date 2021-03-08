@@ -1,3 +1,10 @@
+"""
+A simple framework for UNIX socket server and client, exchanging JSON messages.
+
+The server spawns a new thread for every client connection.
+"""
+
+
 import json
 import logging
 import socketserver
@@ -9,6 +16,9 @@ from typing import List, Dict
 
 
 class Conn(socketserver.BaseRequestHandler):
+    """
+    A single server connection.
+    """
     def __init__(self, request, client_address, server):
         self.ipc_server: 'IpcServer' = server.ipc_server
         self.lock = Lock()

@@ -1,13 +1,46 @@
+"""
+A client for sync_server.
+
+Example usage:
+
+    client = Client('server.sock')
+    client.start()
+
+    counter = SyncHandle(client, 'counter')
+
+    # Reading:
+    with counter.get_shared():
+        print('counter value', counter.data)
+
+    # Writing (with exclusive lock):
+    with counter.get_exclusive():
+        counter.data += 1
+        counter.modified = True
+
+    # Writing (without exclusive lock):
+    with counter.get_shared():
+        counter.data += 1
+        counter.modified = 1
+"""
+
 from threading import Lock
 from contextlib import contextmanager
 from threading import Condition
 from typing import Dict
-import logging
 
 from ipc import IpcClient
 
 
 class SyncHandle:
+    """
+    A handle for a resource. Can be used as a container for data, or just as a
+    lock.
+
+    The data can be used only when the lock is held (i.e. inside get_shared()
+    and get_exclusive()). Otherwise, the handle can be unloaded at any time by
+    the client.
+    """
+
     def __init__(self, client: 'SyncClient', key: str, data=None):
         self.lock = Lock()
         self.ack = Condition(self.lock)
@@ -20,20 +53,49 @@ class SyncHandle:
 
     @contextmanager
     def get_shared(self):
+        """
+        Lock a handle in shared mode. This can be done by many clients, but
+        guarantees no other client will modify the handle until lock is held.
+        """
+
         with self.lock:
             if not self.valid:
                 self.client.get_shared(self)
             yield
-            if self.modified:
-                if self.shared:
-                    self.client.get_exclusive(self, update=True)
+            if self.modified and self.shared:
+                self.client.get_exclusive(self, update=True)
 
     @contextmanager
     def get_exclusive(self):
+        """
+        Lock a handle in exclusive mode. This will guarantee no other client
+        will use it the same time (in either shared or exclusive mode).
+        """
+
         with self.lock:
             if not self.valid:
                 self.client.get_exclusive(self)
             yield
+
+    def acquire_shared(self):
+        self.lock.acquire()
+        if not self.valid:
+            self.client.get_shared(self)
+            return False
+        return True
+
+    def acquire_exclusive(self):
+        self.lock.acquire()
+        if not self.valid:
+            self.client.get_exclusive(self)
+            return False
+        return True
+
+    def release(self):
+        assert self.lock.locked()
+        if self.modified and self.shared:
+            self.client.get_exclusive(self, update=True)
+        self.lock.release()
 
 
 class SyncClient(IpcClient):
@@ -88,20 +150,3 @@ class SyncClient(IpcClient):
             handle.valid = False
             handle.modified = False
             self.send(['put', handle.key, handle.data])
-
-'''
-logging.basicConfig(level=logging.INFO, format='[%(threadName)s] %(message)s')
-client = SyncClient('server.sock')
-client.start()
-
-import time
-handle = SyncHandle(client, 'a', 0)
-
-while True:
-    with handle.get_exclusive():
-        handle.data += 1
-        handle.modified = True
-        print(handle.data)
-        time.sleep(0.5)
-    time.sleep(0.5)
-'''
