@@ -108,7 +108,7 @@ class SyncServerHandle:
 
     def get_shared(self, conn: Conn):
         if conn in self.shared_conns:
-            return
+            self.shared_conns.remove(conn)
         if conn == self.exclusive_conn:
             self.exclusive_conn = None
 
@@ -119,7 +119,7 @@ class SyncServerHandle:
         if conn in self.shared_conns:
             self.shared_conns.remove(conn)
         if conn == self.exclusive_conn:
-            return
+            self.exclusive_conn = None
 
         self.requests.append(Request(conn=conn, shared=False, data=data, update=update, started=False))
         self._handle_requests()

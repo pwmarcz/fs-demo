@@ -3,15 +3,14 @@ A simple framework for UNIX socket server and client, exchanging JSON messages.
 
 The server spawns a new thread for every client connection.
 """
-
-
+import itertools
 import json
 import logging
 import socketserver
 import sys
 from contextlib import closing
 import socket
-from threading import Lock, Thread
+from threading import Lock, Thread, current_thread
 from typing import List, Dict
 
 
@@ -29,7 +28,7 @@ class Conn(socketserver.BaseRequestHandler):
         try:
             with closing(self.request.makefile()) as f:
                 for line in f:
-                    logging.info('receive: %s', line.rstrip())
+                    logging.info('receive: %s from: %s', line.rstrip(), self)
                     data = json.loads(line)
                     self.ipc_server.handle_message(self, data)
         except Exception:
@@ -41,13 +40,20 @@ class Conn(socketserver.BaseRequestHandler):
 
     def send(self, data):
         line = json.dumps(data) + '\n'
-        logging.info('send: %s', line.rstrip())
+        logging.info('send: %s to: %s', line.rstrip(), self)
         with self.lock:
             self.request.sendall(line.encode())
 
 
 class SocketServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    pass
+    def __init__(self, *args, **kwargs):
+        self.counter = itertools.count()
+        super().__init__(*args, **kwargs)
+
+    def process_request_thread(self, request, client_address):
+        n = next(self.counter)
+        current_thread().name = f'Server-{n}'
+        super().process_request_thread(request, client_address)
 
 
 class IpcServer:
@@ -88,7 +94,14 @@ class IpcClient:
         self.conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.conn.connect(self.path)
         logging.info('connected to %s', self.path)
-        Thread(target=self._run, daemon=True).start()
+        self.thread = Thread(target=self._run)
+        self.thread.start()
+
+    def stop(self):
+        if self.conn:
+            self.conn.shutdown(socket.SHUT_RDWR)
+            self.conn.close()
+        self.thread.join()
 
     def handle_message(self, data):
         raise NotImplementedError()

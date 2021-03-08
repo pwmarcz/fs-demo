@@ -70,10 +70,12 @@ group client 1: write("foo.txt"); client 2: write("foo.txt")
   note left of c1 #white
     Once the write is finished, we can
     release the exclusive handle (with
-    updated position).
+    updated position), as requested by
+    "drop".
   end note
-
   s -> c2: ack("file:123", 64, exclusive)
+  activate c2 #ffbbbb
+
   rnote over c2: ...write ends
 end
 

@@ -5,6 +5,7 @@ This is a mock-up exploring a concept of a distributed filesystem for [Graphene]
 ## Source Overview
 
 * `fs.py` - filesystem code
+* `demo.py` - demo code (run with `python3 demo.py demo_name`)
 * `sync_client.py, sync_server.py` - the sync framework
 * `ipc.py`, `util.py` - utilities and base code
 
@@ -32,7 +33,7 @@ We use an abstraction of a **sync handle**, which is a kind of a distributed loc
 
 * `mode`: for a given client, it can be invalid (need to be requested again), shared, or exclusive
 * `data`: optionally, a small amount of data to be shared between client 
-* `lock`: an internal lock, held when the handle is in use.
+* `user_lock`: a local lock, held when the handle is in use.
 
 The handle is not released immediately after use (that is, after `lock` is dropped), but asynchronously, when another thread needs it. This way, if a handle is not contested by other processes, it can be held indefinitely. 
 

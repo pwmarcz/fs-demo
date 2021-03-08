@@ -22,7 +22,7 @@ Example usage:
         counter.data += 1
         counter.modified = 1
 """
-
+from enum import Enum
 from threading import Lock
 from contextlib import contextmanager
 from threading import Condition
@@ -36,20 +36,27 @@ class SyncHandle:
     A handle for a resource. Can be used as a container for data, or just as a
     lock.
 
-    The data can be used only when the lock is held (i.e. inside get_shared()
-    and get_exclusive()). Otherwise, the handle can be unloaded at any time by
-    the client.
+    The data can be used only when the user_lock is held. Otherwise, the handle
+    can be unloaded at any time by the client.
     """
 
     def __init__(self, client: 'SyncClient', key: str, data=None):
-        self.lock = Lock()
-        self.ack = Condition(self.lock)
         self.key = key
+        self.client = client
+
+        self.user_lock = Lock()
+        self.prop_lock = Lock()
+        self.ack = Condition(self.prop_lock)
+
+        # Protected by user_lock
         self.data = data
+        self.modified = False
+
+        # Protected by prop_lock
+        self.used = False
         self.valid = False
         self.shared = False
-        self.modified = False
-        self.client = client
+        self.need_put = False
 
     @contextmanager
     def get_shared(self):
@@ -58,12 +65,10 @@ class SyncHandle:
         guarantees no other client will modify the handle until lock is held.
         """
 
-        with self.lock:
-            if not self.valid:
-                self.client.get_shared(self)
+        with self.user_lock:
+            self._acquire(shared=True)
             yield
-            if self.modified and self.shared:
-                self.client.get_exclusive(self, update=True)
+            self._release()
 
     @contextmanager
     def get_exclusive(self):
@@ -72,30 +77,42 @@ class SyncHandle:
         will use it the same time (in either shared or exclusive mode).
         """
 
-        with self.lock:
+        with self.user_lock:
             if not self.valid:
-                self.client.get_exclusive(self)
+                self.client.get(self, shared=False)
             yield
 
-    def acquire_shared(self):
-        self.lock.acquire()
-        if not self.valid:
-            self.client.get_shared(self)
+    def _acquire(self, shared=True):
+        with self.prop_lock:
+            self.used = True
+            if not self.valid or (not shared and self.shared):
+                self.client.get(self, shared)
+                return True
             return False
-        return True
 
-    def acquire_exclusive(self):
-        self.lock.acquire()
-        if not self.valid:
-            self.client.get_exclusive(self)
-            return False
-        return True
+    def acquire(self, shared=True) -> bool:
+        """
+        Lock a handle in shared/exclusive mode. You need to unlock it
+        afterwards using release().
+
+        Returns True if the handle has changed (i.e. it was invalid for a time.)
+        """
+        self.user_lock.acquire()
+        return self._acquire(shared)
+
+    def _release(self):
+        with self.prop_lock:
+            if self.modified and self.shared:
+                self.client.get(self, shared=False, update=True)
+            self.used = False
+            if self.need_put:
+                self.client.put(self)
+                self.need_put = False
 
     def release(self):
-        assert self.lock.locked()
-        if self.modified and self.shared:
-            self.client.get_exclusive(self, update=True)
-        self.lock.release()
+        assert self.user_lock.locked()
+        self._release()
+        self.user_lock.release()
 
 
 class SyncClient(IpcClient):
@@ -115,27 +132,23 @@ class SyncClient(IpcClient):
             raise KeyError(f'unknown method: {method}')
         self.methods[method](*args)
 
-    def get_shared(self, handle: SyncHandle):
-        assert handle.lock.locked()
+    def get(self, handle: SyncHandle, shared: bool, update: bool = False):
+        assert handle.user_lock.locked()
+        assert handle.prop_lock.locked()
         with self.lock:
             self.handles[handle.key] = handle
         handle.valid = False
-        self.send(['get', handle.key, handle.data])
-        handle.ack.wait()
-
-    def get_exclusive(self, handle: SyncHandle, update=False):
-        assert handle.lock.locked()
-        with self.lock:
-            self.handles[handle.key] = handle
-        handle.valid = False
-        self.send(['get_exclusive', handle.key, handle.data, update])
+        if shared:
+            self.send(['get', handle.key, handle.data])
+        else:
+            self.send(['get_exclusive', handle.key, handle.data, update])
         handle.ack.wait()
 
     def on_ack(self, key, data, shared):
         with self.lock:
             handle = self.handles[key]
 
-        with handle.lock:
+        with handle.prop_lock:
             handle.valid = True
             handle.modified = False
             handle.data = data
@@ -146,7 +159,14 @@ class SyncClient(IpcClient):
         with self.lock:
             handle = self.handles[key]
 
-        with handle.lock:
-            handle.valid = False
-            handle.modified = False
-            self.send(['put', handle.key, handle.data])
+        with handle.prop_lock:
+            if handle.used:
+                handle.need_put = True
+            else:
+                self.put(handle)
+
+    def put(self, handle):
+        assert handle.prop_lock.locked()
+        handle.valid = False
+        handle.modified = False
+        self.send(['put', handle.key, handle.data])

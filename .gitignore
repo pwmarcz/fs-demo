@@ -3,3 +3,6 @@
 venv/
 server.sock
 diagrams/plantuml.jar
+
+tmp/*
+

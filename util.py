@@ -9,6 +9,10 @@ def random_sleep():
 
 
 def trace(method):
+    """
+    A decorator that logs method invocations.
+    """
+
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         name = self.__class__.__name__ + '.' + method.__name__
