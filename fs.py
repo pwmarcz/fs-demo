@@ -1,12 +1,10 @@
 import os
-import traceback
 from contextlib import contextmanager
-from threading import Thread
-from typing import IO, Optional, ContextManager, List, Dict
 from enum import Enum
+from typing import IO, Optional, ContextManager, List, Dict
 
 from sync_client import SyncClient, SyncHandle
-from util import random_sleep, trace, setup_logging
+from util import trace, setup_logging
 
 
 def split_path(path: str) -> List[str]:
@@ -70,14 +68,13 @@ class Handle:
 
 
 class Mount:
-    def __init__(self, key: str, root_path: str, client: SyncClient):
+    def __init__(self, key: str, root_path: str):
         self.key = key
         self.root_path = root_path
-        self.client = client
 
     @trace
-    def create_dentry(self, path: str):
-        sync = SyncHandle(self.client, f'dentry:{self.key}:{path}')
+    def create_dentry(self, path: str, client: SyncClient):
+        sync = SyncHandle(client, f'dentry:{self.key}:{path}')
         dentry = Dentry(
             mount=self,
             path=path,
@@ -107,24 +104,30 @@ class Mount:
         os.truncate(dentry.host_path, size)
 
     @trace
-    def create_file(self, dentry: Dentry, key: str, append: bool) -> Handle:
+    def create_file(self, dentry: Dentry, key: str, append: bool,
+                    client: SyncClient) -> Handle:
         assert dentry.file_type is None
         file = open(dentry.host_path, 'w+b')
-        sync = SyncHandle(self.client, key, 0)
+        sync = SyncHandle(client, key, 0)
         handle = Handle(self, dentry, file, append, sync)
         return handle
 
     @trace
-    def open_file(self, dentry: Dentry, key: str, append: bool) -> Handle:
+    def open_file(self, dentry: Dentry, key: str, append: bool,
+                  client: SyncClient) -> Handle:
         assert dentry.file_type == FileType.REGULAR
         file = open(dentry.host_path, 'r+b')
-        sync = SyncHandle(self.client, key, 0)
+        sync = SyncHandle(client, key, 0)
         handle = Handle(self, dentry, file, append, sync)
         return handle
 
     @trace
-    def write(self, handle: Handle, pos: int, data: bytes):
+    def write(self, handle: Handle, pos: int, data: bytes) -> int:
         return os.pwrite(handle.file.fileno(), data, pos)
+
+    @trace
+    def read(self, handle: Handle, pos: int, length: int) -> bytes:
+        return os.pread(handle.file.fileno(), length, pos)
 
 
 class FS:
@@ -134,7 +137,7 @@ class FS:
         self.counter = 0
         self.root_mount = root_mount
 
-        self.root: Dentry = root_mount.create_dentry('')
+        self.root: Dentry = root_mount.create_dentry('', self.client)
         self.dentry_cache = {self.root.key: self.root}
         self.handles: Dict[int, Handle] = {}
 
@@ -147,8 +150,7 @@ class FS:
         client = SyncClient(self.client.path)
         client.start()
         try:
-            root_mount = Mount(self.root_mount.key, self.root_mount.root_path, client)
-            fs = FS(pid=self.pid+1, client=client, root_mount=root_mount)
+            fs = FS(pid=self.pid+1, client=client, root_mount=self.root_mount)
             yield fs
         finally:
             client.stop()
@@ -166,7 +168,7 @@ class FS:
             raise
 
     @contextmanager
-    def _get_dentry(self, dentry: Dentry, shared: bool):
+    def _use_dentry(self, dentry: Dentry, shared: bool):
         self._load_dentry(dentry, shared)
         try:
             yield
@@ -193,7 +195,7 @@ class FS:
             if key in self.dentry_cache:
                 dentry = self.dentry_cache[key]
             else:
-                dentry = self.root_mount.create_dentry(next_path)
+                dentry = self.root_mount.create_dentry(next_path, self.client)
                 self.dentry_cache[key] = dentry
             self._load_dentry(dentry, shared=True)
 
@@ -231,30 +233,30 @@ class FS:
             key = f'handle:{self.pid}:{fd}'
 
             if dentry.file_type is None:
-                handle = dentry.mount.create_file(dentry, key, append)
+                handle = dentry.mount.create_file(dentry, key, append, self.client)
                 dentry.file_type = FileType.REGULAR
                 dentry.size = 0
                 dentry.sync.modified = True
             else:
-                handle = dentry.mount.open_file(dentry, key, append)
+                handle = dentry.mount.open_file(dentry, key, append, self.client)
 
             self.handles[fd] = handle
             return fd
 
     @trace
-    def write(self, fd: int, data: bytes):
+    def write(self, fd: int, data: bytes) -> int:
         handle = self.handles[fd]
         dentry = handle.dentry
         if handle.append:
             # In append mode, lock the dentry and use its size as position.
-            with self._get_dentry(dentry, shared=False):
+            with self._use_dentry(dentry, shared=False):
                 result = dentry.mount.write(handle, dentry.size, data)
                 if result > 0:
                     dentry.size += result
                     dentry.sync.modified = True
         else:
             # In non-append mode, lock the handle and use its position.
-            with handle.sync.get_exclusive():
+            with handle.sync.use(shared=False):
                 handle.pos = handle.sync.data
                 result = handle.dentry.mount.write(handle, handle.pos, data)
                 end = handle.pos + result
@@ -265,11 +267,23 @@ class FS:
 
             # Update dentry size, if necessary.
             if result > 0:
-                with self._get_dentry(dentry, shared=False):
+                with self._use_dentry(dentry, shared=False):
                     if dentry.size < end:
                         dentry.size = end
                         dentry.modified = True
 
+        return result
+
+    @trace
+    def read(self, fd: int, length: bytes) -> bytes:
+        handle = self.handles[fd]
+        with handle.sync.use(shared=False):
+            handle.pos = handle.sync.data
+            result = handle.dentry.mount.read(handle, handle.pos, length)
+            if len(result) > 0:
+                handle.pos += len(result)
+                handle.sync.data = handle.pos
+                handle.sync.modified = True
         return result
 
     @trace
@@ -288,7 +302,7 @@ def main():
 
     client = SyncClient('server.sock')
     client.start()
-    mount = Mount('tmp', '/tmp', client)
+    mount = Mount('tmp', '/tmp')
     fs = FS(os.getpid(), client, mount)
     fd = fs.open('/foo.txt', append=True)
     fs.write(fd, b'hello\n')

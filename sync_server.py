@@ -7,19 +7,24 @@ can be either
 
 Client messages:
 
-* ["get", key, default_data]: The client requests resource in shared mode.
-  The server will respond by "ack" when the resource can be used.
-* ["get_exclusive", key, data, update]: The client requests resource in
-  exclusive mode. The server will respond by "ack" when the resource can be
-  used. If update is true, the data stored by handle will be updated.
-* ["put", key, data]: The client stops using resource (and reports latest
-  version of data).
+* ["req_get", key, shared, data, update]: The client requests resource,
+  in either shared or exclusive mode. The server will respond by "get" when the
+  resource can be used.
+
+  If ``update`` is true, the data stored by handle will be updated. Otherwise,
+  the value of ``data`` will be used only as a default. This can be used only
+  in exclusive mode.
+
+* ["put", key, data]: The client stops using resource, and reports latest
+  version of data. The data will be updated only in exclusive mode.
 
 Server messages:
 
-* ["ack", key, data, shared]: The client is permitted to use the resource.
-* ["drop", key]: The server requests client to to unload a resource. The client
-  should respond with "put" when ready.
+* ["get", key, shared, data]: The client is permitted to use the resource, in
+  either shared or exclusive mode.
+
+* ["req_put", key]: The server requests client to to unload a resource. The
+  client should respond with "put" when ready.
 """
 
 import os
@@ -34,8 +39,11 @@ from ipc import Conn, IpcServer
 @dataclass
 class Request:
     """
-    A client request to use resource (get/get_exclusive). Can be handled
-    immediately, or queued.
+    A client request to use resource (req_get). Can be handled immediately, or
+    queued.
+
+    ``started`` means we already requested other clients to release the
+    resource. This should happen for one request at a time.
     """
 
     conn: Conn
@@ -76,15 +84,17 @@ class SyncServerHandle:
 
         if request.shared and not self.exclusive_conn:
             assert request.conn not in self.shared_conns
+            assert not request.update
             self.shared_conns.append(request.conn)
-            request.conn.send(['ack', self.key, self.data, True])
+            request.conn.send(['get', self.key, True, self.data])
             return True
 
-        if not request.shared and not self.exclusive_conn and not self.shared_conns:
+        if not request.shared and not self.exclusive_conn and \
+                not self.shared_conns:
             self.exclusive_conn = request.conn
             if request.update:
                 self.data = request.data
-            request.conn.send(['ack', self.key, self.data, False])
+            request.conn.send(['get', self.key, False, self.data])
             return True
 
         return False
@@ -97,31 +107,23 @@ class SyncServerHandle:
 
         if request.shared:
             assert self.exclusive_conn
-            self.exclusive_conn.send(['drop', self.key])
+            self.exclusive_conn.send(['req_put', self.key])
         else:
             if self.exclusive_conn:
-                self.exclusive_conn.send(['drop', self.key])
-            else:
-                assert self.shared_conns
-                for conn in self.shared_conns:
-                    conn.send(['drop', self.key])
+                self.exclusive_conn.send(['req_put', self.key])
+            for conn in self.shared_conns:
+                conn.send(['req_put', self.key])
 
-    def get_shared(self, conn: Conn):
+    def req_get(self, conn: Conn, shared: bool, data: Any, update: bool):
+        if shared:
+            assert not update
+
         if conn in self.shared_conns:
             self.shared_conns.remove(conn)
         if conn == self.exclusive_conn:
             self.exclusive_conn = None
 
-        self.requests.append(Request(conn=conn, shared=True, data=None, update=False, started=False))
-        self._handle_requests()
-
-    def get_exclusive(self, conn: Conn, data: Any, update: bool):
-        if conn in self.shared_conns:
-            self.shared_conns.remove(conn)
-        if conn == self.exclusive_conn:
-            self.exclusive_conn = None
-
-        self.requests.append(Request(conn=conn, shared=False, data=data, update=update, started=False))
+        self.requests.append(Request(conn, shared, data, update, started=False))
         self._handle_requests()
 
     def put(self, conn: Conn, data: Any):
@@ -131,7 +133,8 @@ class SyncServerHandle:
             self.exclusive_conn = None
             self.data = data
 
-        self.requests = [request for request in self.requests if request.conn != conn]
+        self.requests = [request for request in self.requests
+                         if request.conn != conn]
         self._handle_requests()
 
 
@@ -140,28 +143,25 @@ class SyncServer(IpcServer):
         super().__init__(path)
 
         self.methods = {
-            'get': self.on_get,
-            'get_exclusive': self.on_get_exclusive,
+            'req_get': self.on_req_get,
             'put': self.on_put,
         }
         self.lock = Lock()
         self.handles: Dict[str, SyncServerHandle] = {}
 
-    def _get_handle(self, key: str, default_data=None):
+    def _get_handle(self, key: str, default_data):
         assert self.lock.locked()
         if key not in self.handles:
             self.handles[key] = SyncServerHandle(key=key, data=default_data)
         return self.handles[key]
 
-    def on_get(self, conn: Conn, key: str, default_data=None):
+    def on_req_get(self, conn: Conn, key: str, shared: bool, data: Any,
+                   update: bool):
         with self.lock:
-            handle = self._get_handle(key, default_data)
-            handle.get_shared(conn)
-
-    def on_get_exclusive(self, conn: Conn, key: str, data=None, update=False):
-        with self.lock:
-            handle = self._get_handle(key, data)
-            handle.get_exclusive(conn, data, update)
+            if key not in self.handles:
+                self.handles[key] = SyncServerHandle(key, data)
+            handle = self.handles[key]
+            handle.req_get(conn, shared, data, update)
 
     def on_put(self, conn: Conn, key: str, data: Any):
         with self.lock:

@@ -41,6 +41,9 @@ def append(fs_: FS):
                 random_sleep()
 
     repeat(writer, 2)
+    fd = fs_.open('/log.txt')
+    data = fs_.read(fd, 2048)
+    print(data.decode(), end='')
 
 
 def main():
@@ -78,7 +81,7 @@ def main():
         exit.callback(client.stop)
 
         # Create objects
-        mount = Mount('tmp', temp_dir, client)
+        mount = Mount('tmp', temp_dir)
         fs = FS(0, client, mount)
 
         # Run demo

@@ -18,8 +18,11 @@ class Conn(socketserver.BaseRequestHandler):
     """
     A single server connection.
     """
+    counter = itertools.count()
+
     def __init__(self, request, client_address, server):
         self.ipc_server: 'IpcServer' = server.ipc_server
+        self.id = next(self.counter)
         self.lock = Lock()
         super().__init__(request, client_address, server)
 
@@ -28,7 +31,7 @@ class Conn(socketserver.BaseRequestHandler):
         try:
             with closing(self.request.makefile()) as f:
                 for line in f:
-                    logging.info('receive: %s from: %s', line.rstrip(), self)
+                    logging.info('receive from %s: %s', self.id, line.rstrip())
                     data = json.loads(line)
                     self.ipc_server.handle_message(self, data)
         except Exception:
@@ -40,20 +43,16 @@ class Conn(socketserver.BaseRequestHandler):
 
     def send(self, data):
         line = json.dumps(data) + '\n'
-        logging.info('send: %s to: %s', line.rstrip(), self)
+        logging.info('send to %s: %s', self.id, line.rstrip())
         with self.lock:
             self.request.sendall(line.encode())
 
+    def __repr__(self):
+        return f'<Conn: {self.id}>'
+
 
 class SocketServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    def __init__(self, *args, **kwargs):
-        self.counter = itertools.count()
-        super().__init__(*args, **kwargs)
-
-    def process_request_thread(self, request, client_address):
-        n = next(self.counter)
-        current_thread().name = f'Server-{n}'
-        super().process_request_thread(request, client_address)
+    pass
 
 
 class IpcServer:
@@ -89,6 +88,7 @@ class IpcClient:
         self.conn = None
         self.thread = None
         self.lock = Lock()
+        self.methods: Dict[str, callable] = {}
 
     def start(self):
         self.conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -104,7 +104,10 @@ class IpcClient:
         self.thread.join()
 
     def handle_message(self, data):
-        raise NotImplementedError()
+        method, args = data[0], data[1:]
+        if method not in self.methods:
+            raise KeyError(f'unknown method: {method}')
+        self.methods[method](*args)
 
     def _run(self):
         try:
