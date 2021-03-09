@@ -21,8 +21,9 @@ def repeat(target, n):
 
 def hello_world(fs: FS):
     """
-    Simple sanity check.
+    Simple sanity check for dentry invalidation.
     """
+
     fs.readdir('/')              # no hello.txt
     fs.stat('/hello.txt')        # None
     fd = fs.open('/hello.txt')
@@ -33,6 +34,10 @@ def hello_world(fs: FS):
 
 
 def append(fs_: FS):
+    """
+    Several clients writing to the same file in append mode.
+    """
+
     def writer():
         with fs_.cloned() as fs:
             fd = fs.open('/log.txt', append=True)
@@ -40,8 +45,27 @@ def append(fs_: FS):
                 fs.write(fd, f'log line {i}\n'.encode())
                 random_sleep()
 
-    repeat(writer, 2)
+    repeat(writer, 3)
     fd = fs_.open('/log.txt')
+    data = fs_.read(fd, 2048)
+    print(data.decode(), end='')
+
+
+def shared_handle(fs_: FS):
+    """
+    Several clients writing to a shared file handle.
+    """
+
+    fd = fs_.open('/log.txt')
+
+    def writer():
+        with fs_.cloned() as fs:
+            for i in range(10):
+                fs.write(fd, f'log line {i}\n'.encode())
+                random_sleep()
+
+    repeat(writer, 3)
+    fs_.seek(fd, 0)
     data = fs_.read(fd, 2048)
     print(data.decode(), end='')
 
@@ -50,11 +74,12 @@ def main():
     demos = {
         'hello_world': hello_world,
         'append': append,
+        'shared_handle': shared_handle,
     }
 
     if len(sys.argv) != 2 or sys.argv[1] not in demos:
         print(f'Usage: {sys.argv[0]} demo_name')
-        print('Demo names:', ' '.join(demos.keys()))
+        print('Demo names:', ', '.join(demos.keys()))
         print('(read demo.py for details)')
         sys.exit(1)
 

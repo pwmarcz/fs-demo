@@ -144,21 +144,38 @@ class FS:
     @contextmanager
     def cloned(self) -> ContextManager['FS']:
         """
-        Create a copy of this filesystem, emulating what happens after fork.
+        Create a copy of this FS, emulating what happens after fork.
         """
 
         client = SyncClient(self.client.path)
         client.start()
         try:
             fs = FS(pid=self.pid+1, client=client, root_mount=self.root_mount)
+            for fd, handle in self.handles.items():
+                fs._clone_handle(fd, handle)
             yield fs
         finally:
             client.stop()
 
+    def _clone_handle(self, fd: int, handle: Handle):
+        """
+        Clone a file handle from another FS.
+        """
+
+        dentry = self._clone_dentry(handle.dentry)
+        with self._use_dentry(dentry, shared=True):
+            assert dentry.file_type is not None
+            handle = dentry.mount.open_file(
+                dentry, handle.sync.key, handle.append, self.client)
+
+            self.handles[fd] = handle
+
     def _load_dentry(self, dentry: Dentry, shared: bool):
         """
         Lock a dentry and ensure it's valid (reloaded after modification).
+        Needs to be unlocked with dentry.sync.release().
         """
+
         modified = dentry.sync.acquire(shared)
         try:
             if modified:
@@ -203,6 +220,19 @@ class FS:
             yield dentry
         finally:
             dentry.sync.release()
+
+    def _clone_dentry(self, dentry: Dentry) -> Dentry:
+        """
+        Clone a dentry from another FS.
+        """
+
+        key = f'{dentry.mount.key}:{dentry.path}'
+        if key in self.dentry_cache:
+            dentry = self.dentry_cache[key]
+        else:
+            dentry = self.root_mount.create_dentry(dentry.path, self.client)
+            self.dentry_cache[key] = dentry
+        return dentry
 
     @trace
     def readdir(self, path):
@@ -275,7 +305,7 @@ class FS:
         return result
 
     @trace
-    def read(self, fd: int, length: bytes) -> bytes:
+    def read(self, fd: int, length: int) -> bytes:
         handle = self.handles[fd]
         with handle.sync.use(shared=False):
             handle.pos = handle.sync.data
@@ -287,7 +317,7 @@ class FS:
         return result
 
     @trace
-    def stat(self, path):
+    def stat(self, path: str):
         with self._find_dentry(path) as dentry:
             if dentry.file_type is None:
                 return None
@@ -295,6 +325,14 @@ class FS:
                 'type': dentry.file_type.name,
                 'size': dentry.size,
             }
+
+    @trace
+    def seek(self, fd: int, pos: int):
+        handle = self.handles[fd]
+        with handle.sync.use(shared=False):
+            handle.pos = pos
+            handle.sync.data = pos
+            handle.sync.modified = True
 
 
 def main():
