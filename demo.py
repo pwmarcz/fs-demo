@@ -115,7 +115,7 @@ def main():
 
         # Create objects
         mount = Mount('tmp', temp_dir)
-        fs = FS(0, client, mount)
+        fs = FS(client, mount)
 
         # Run demo
         demo(fs)

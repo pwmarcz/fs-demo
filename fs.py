@@ -1,4 +1,5 @@
 import os
+import random
 from contextlib import contextmanager
 from enum import Enum
 from typing import IO, Optional, ContextManager, List, Dict
@@ -131,10 +132,9 @@ class Mount:
 
 
 class FS:
-    def __init__(self, pid: int, client: SyncClient, root_mount: Mount):
-        self.pid = pid
+    def __init__(self, client: SyncClient, root_mount: Mount):
+        self.pid = random.randint(1, 2**16)
         self.client = client
-        self.counter = 0
         self.root_mount = root_mount
 
         self.root: Dentry = root_mount.create_dentry('', self.client)
@@ -150,7 +150,7 @@ class FS:
         client = SyncClient(self.client.path)
         client.start()
         try:
-            fs = FS(pid=self.pid+1, client=client, root_mount=self.root_mount)
+            fs = FS(client=client, root_mount=self.root_mount)
             for fd, handle in self.handles.items():
                 fs._clone_handle(fd, handle)
             yield fs
@@ -341,7 +341,7 @@ def main():
     client = SyncClient('server.sock')
     client.start()
     mount = Mount('tmp', '/tmp')
-    fs = FS(os.getpid(), client, mount)
+    fs = FS(client, mount)
     fd = fs.open('/foo.txt', append=True)
     fs.write(fd, b'hello\n')
     fs.write(fd, b'world\n')
