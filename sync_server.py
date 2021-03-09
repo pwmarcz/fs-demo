@@ -65,6 +65,9 @@ class SyncServerHandle:
         self.exclusive_conn = None
         self.requests = []
 
+    def unused(self):
+        return not (self.shared_conns or self.exclusive_conn or self.requests)
+
     def _handle_requests(self):
         while self.requests:
             request = self.requests[0]
@@ -152,6 +155,7 @@ class SyncServer(IpcServer):
     def _get_handle(self, key: str, default_data):
         assert self.lock.locked()
         if key not in self.handles:
+            logging.info('server: creating new handle: %r, %r', key, default_data)
             self.handles[key] = SyncServerHandle(key=key, data=default_data)
         return self.handles[key]
 
@@ -170,8 +174,12 @@ class SyncServer(IpcServer):
 
     def remove_conn(self, conn: Conn):
         with self.lock:
-            for key, handle in self.handles.items():
+            for key, handle in list(self.handles.items()):
                 handle.put(conn, handle.data)
+                if handle.unused():
+                    logging.info('server: deleting unused handle: %r, %r',
+                                 handle.key, handle.data)
+                    del self.handles[key]
         super().remove_conn(conn)
 
 
