@@ -2,12 +2,20 @@
 
 This is a mock-up exploring a concept of a distributed filesystem for [Graphene](https://github.com/oscarlab/graphene/).
 
-## Source Overview
+## Source overview
 
 * `fs.py` - filesystem code
 * `demo.py` - demo code (run with `python3 demo.py demo_name`)
 * `sync_client.py, sync_server.py` - the sync framework
 * `ipc.py`, `util.py` - utilities and base code
+
+## Running the demos
+
+See [`demo.py`](demo.py) for the source of the demos.
+
+* `python3 demo.py simple` - A simple test for cache invalidation: one client creates and modifies a file, another should see the changes.
+* `python3 demo.py append` - Multiple processes writing to a file (by opening it with `O_APPEND`).
+* `python3 demo.py shared_handle` - Multiple processes writing to a file (using a shared file handle). 
 
 ## Assumptions
 

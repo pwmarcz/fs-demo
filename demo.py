@@ -19,18 +19,26 @@ def repeat(target, n):
         thread.join()
 
 
-def hello_world(fs: FS):
+def simple(fs: FS):
     """
     Simple sanity check for dentry invalidation.
     """
 
-    fs.readdir('/')              # no hello.txt
-    fs.stat('/hello.txt')        # None
-    fd = fs.open('/hello.txt')
-    fs.stat('/hello.txt')        # size = 0
-    fs.write(fd, b'hello')
-    fs.stat('/hello.txt')        # size = 5
-    fs.readdir('/')              # hello.txt present
+    with fs.cloned() as fs2:
+        fs.readdir('/')              # no hello.txt
+        fs.stat('/hello.txt')        # None
+        fs2.stat('/hello.txt')
+
+        fd = fs.open('/hello.txt')
+        fs.stat('/hello.txt')        # size = 0
+        fs2.stat('/hello.txt')
+
+        fs.write(fd, b'hello')
+        fs.stat('/hello.txt')        # size = 5
+        fs2.stat('/hello.txt')
+
+        fs.readdir('/')              # hello.txt present
+        fs2.readdir('/')
 
 
 def append(fs_: FS):
@@ -72,7 +80,7 @@ def shared_handle(fs_: FS):
 
 def main():
     demos = {
-        'hello_world': hello_world,
+        'simple': simple,
         'append': append,
         'shared_handle': shared_handle,
     }

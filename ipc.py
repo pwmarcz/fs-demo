@@ -31,7 +31,7 @@ class Conn(socketserver.BaseRequestHandler):
         try:
             with closing(self.request.makefile()) as f:
                 for line in f:
-                    logging.info('receive from %s: %s', self.id, line.rstrip())
+                    logging.info('server receive from %s: %s', self.id, line.rstrip())
                     data = json.loads(line)
                     self.ipc_server.handle_message(self, data)
         except Exception:
@@ -43,7 +43,7 @@ class Conn(socketserver.BaseRequestHandler):
 
     def send(self, data):
         line = json.dumps(data) + '\n'
-        logging.info('send to %s: %s', self.id, line.rstrip())
+        logging.info('server send to %s: %s', self.id, line.rstrip())
         with self.lock:
             self.request.sendall(line.encode())
 
@@ -64,11 +64,11 @@ class IpcServer:
         self.methods: Dict[str, callable] = {}
 
     def add_conn(self, conn: Conn):
-        logging.info('add_conn: %s', conn)
+        logging.info('server add_conn: %s', conn)
         self.conns.append(conn)
 
     def remove_conn(self, conn: Conn):
-        logging.info('remove_conn: %s', conn)
+        logging.info('server remove_conn: %s', conn)
         self.conns.remove(conn)
 
     def handle_message(self, conn: Conn, data):
@@ -78,7 +78,7 @@ class IpcServer:
         self.methods[method](conn, *args)
 
     def run(self):
-        logging.info('listening at %s', self.path)
+        logging.info('server listening at %s', self.path)
         self.socket_server.serve_forever()
 
 
@@ -93,7 +93,7 @@ class IpcClient:
     def start(self):
         self.conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.conn.connect(self.path)
-        logging.info('connected to %s', self.path)
+        logging.info('client connected to %s', self.path)
         self.thread = Thread(target=self._run)
         self.thread.start()
 
@@ -113,7 +113,7 @@ class IpcClient:
         try:
             with closing(self.conn.makefile()) as f:
                 for line in f:
-                    logging.info('receive: %s', line.rstrip())
+                    logging.info('client receive: %s', line.rstrip())
                     data = json.loads(line)
                     self.handle_message(data)
         except Exception:
@@ -122,6 +122,6 @@ class IpcClient:
 
     def send(self, data):
         line = json.dumps(data) + '\n'
-        logging.info('send: %s', line.rstrip())
+        logging.info('client send: %s', line.rstrip())
         with self.lock:
             self.conn.sendall(line.encode())
