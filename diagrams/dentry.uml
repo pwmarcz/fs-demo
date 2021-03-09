@@ -12,8 +12,8 @@ group client 1: stat("foo.txt")
     handle from the server.
   end note
 
-  c1 -> s: get_shared("dentry:foo.txt")
-  s -> c1: ack("dentry:foo.txt", shared)
+  c1 -> s: req_get("dentry:foo.txt", shared)
+  s -> c1: get("dentry:foo.txt", shared)
   activate c1
 
 end
@@ -31,8 +31,8 @@ group client 2: stat("foo.txt")
     in shared mode.
   end note
 
-  c2 -> s: get_shared("dentry:foo.txt")
-  s -> c2: ack("dentry:foo.txt", shared)
+  c2 -> s: req_get("dentry:foo.txt", shared)
+  s -> c2: get("dentry:foo.txt", shared)
   activate c2
 
 end
@@ -59,14 +59,14 @@ group client 1: truncate("foo.txt")
     for other clients.
   end note
 
-  c1 -> s: get_exclusive("dentry:foo.txt")
+  c1 -> s: req_get("dentry:foo.txt", exclusive)
   deactivate c1
 
-  s -> c2: drop("dentry:foo.txt")
+  s -> c2: req_put("dentry:foo.txt")
   c2 -> s: put("dentry:foo.txt")
   deactivate c2
 
-  s -> c1: ack("dentry:foo.txt", exclusive)
+  s -> c1: get("dentry:foo.txt", exclusive)
   activate c1 #ffbbbb
 
 end
@@ -80,8 +80,8 @@ end note
 
 group client 2: stat("foo.txt")
 
-  c2 -> s: get_shared("dentry:foo.txt")
-  s -> c1: drop("dentry:foo.txt")
+  c2 -> s: req_get("dentry:foo.txt", shared)
+  s -> c1: req_put("dentry:foo.txt")
   c1 -> s: put("dentry:foo.txt")
   deactivate c1
 
@@ -90,7 +90,7 @@ group client 2: stat("foo.txt")
     handle, so we release it.
   end note
 
-  s -> c2: ack("dentry:foo.txt", shared)
+  s -> c2: get("dentry:foo.txt", shared)
   activate c2
 
 end
