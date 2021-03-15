@@ -1,0 +1,20 @@
+@startuml
+state invalid : Not held by client
+state invalid : (need to acquire latest version)
+
+state shared : Latest version is held by client,
+state shared : but others may have it as well
+
+state exclusive : Latest version is held exclusively
+state exclusive : by client, and can be modified
+
+invalid -> shared : up
+shared -> exclusive: up
+invalid -> exclusive: up
+
+shared -[dotted]-> invalid : down
+exclusive -[dotted]-> shared : down
+exclusive -[dotted]-> invalid : down
+
+
+@enduml

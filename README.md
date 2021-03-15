@@ -47,6 +47,8 @@ The handle is not released immediately after use (that is, after `lock` is dropp
 
 See [`sync_client.py`](sync_client.py) for details of usage, and [`sync_server.py`](sync_server.py) for server implementation and protocol details.
 
+![states.png](diagrams/states.png)
+
 ## Example: dentry cache
 
 Here is a detailed example of two processes accessing a file. As long as the file is only viewed, a shared handle can be held. However, when modifying a file (e.g. `truncate`), we need to tell the other clients to drop the handle, because their cached data will need to be re-acquired. 
