@@ -98,7 +98,7 @@ class SyncServerHandle:
             assert request.conn not in self.shared_conns
             assert not request.update
             self.shared_conns.append(request.conn)
-            request.conn.send(['up', self.key, State.SHARED, self.data])
+            request.conn.send(['up', self.key, State.SHARED.name, self.data])
             return True
 
         if (request.want_state == State.EXCLUSIVE and
@@ -107,7 +107,7 @@ class SyncServerHandle:
             self.exclusive_conn = request.conn
             if request.update:
                 self.data = request.data
-            request.conn.send(['up', self.key, State.EXCLUSIVE, self.data])
+            request.conn.send(['up', self.key, State.EXCLUSIVE.name, self.data])
             return True
 
         return False
@@ -120,12 +120,12 @@ class SyncServerHandle:
 
         if request.want_state == State.SHARED:
             assert self.exclusive_conn
-            self.exclusive_conn.send(['req_down', self.key, State.SHARED])
+            self.exclusive_conn.send(['req_down', self.key, State.SHARED.name])
         else:
             if self.exclusive_conn:
-                self.exclusive_conn.send(['req_down', self.key, State.INVALID])
+                self.exclusive_conn.send(['req_down', self.key, State.INVALID.name])
             for conn in self.shared_conns:
-                conn.send(['req_down', self.key, State.INVALID])
+                conn.send(['req_down', self.key, State.INVALID.name])
 
     def req_up(self, conn: Conn, state: State, data: Any, update: bool):
         assert state in [State.SHARED, State.EXCLUSIVE]
@@ -179,18 +179,18 @@ class SyncServer(IpcServer):
             self.handles[key] = SyncServerHandle(key=key, data=default_data)
         return self.handles[key]
 
-    def on_req_up(self, conn: Conn, key: str, state_val: int, data: Any,
+    def on_req_up(self, conn: Conn, key: str, state_name: str, data: Any,
                    update: bool):
         with self.lock:
             if key not in self.handles:
                 self.handles[key] = SyncServerHandle(key, data)
             handle = self.handles[key]
-            handle.req_up(conn, State(state_val), data, update)
+            handle.req_up(conn, State[state_name], data, update)
 
-    def on_down(self, conn: Conn, key: str, state_val: int, data: Any):
+    def on_down(self, conn: Conn, key: str, state_name: str, data: Any):
         with self.lock:
             handle = self.handles[key]
-            handle.down(conn, State(state_val), data)
+            handle.down(conn, State[state_name], data)
 
     def remove_conn(self, conn: Conn):
         with self.lock:

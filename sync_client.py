@@ -134,26 +134,26 @@ class SyncClient(IpcClient):
         with self.lock:
             self.handles[handle.key] = handle
         handle.state = State.INVALID
-        self.send(['req_up', handle.key, want_state.value, handle.data, update])
+        self.send(['req_up', handle.key, want_state.name, handle.data, update])
         # Wait until the handle is valid, and exclusive (if requested)
         while handle.state < want_state:
             handle.ack.wait()
 
-    def on_up(self, key, state_val: int, data):
+    def on_up(self, key, state_name: str, data):
         with self.lock:
             handle = self.handles[key]
 
         with handle.prop_lock:
             handle.modified = False
             handle.data = data
-            handle.state = State(state_val)
+            handle.state = State[state_name]
             handle.ack.notify_all()
 
-    def on_req_down(self, key, state_val: int):
+    def on_req_down(self, key, state_name: str):
         with self.lock:
             handle = self.handles[key]
 
-        state = State(state_val)
+        state = State[state_name]
 
         with handle.prop_lock:
             if handle.used:
@@ -167,4 +167,4 @@ class SyncClient(IpcClient):
         assert handle.prop_lock.locked()
         handle.state = state
         handle.modified = False
-        self.send(['down', handle.key, handle.state, handle.data])
+        self.send(['down', handle.key, handle.state.name, handle.data])
