@@ -168,3 +168,14 @@ class SyncClient(IpcClient):
         handle.state = state
         handle.modified = False
         self.send(['down', handle.key, handle.state.name, handle.data])
+
+
+if __name__ == '__main__':
+    import logging
+    logging.basicConfig(level=logging.INFO, format='[%(threadName)s] %(message)s')
+
+    path = 'server.sock'
+    client = SyncClient(path)
+    client.start()
+
+    obj = SyncHandle(client, 'file.txt')
