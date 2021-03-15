@@ -334,18 +334,10 @@ class FS:
             handle.sync.data = pos
             handle.sync.modified = True
 
-
-def main():
+if __name__ == '__main__':
     setup_logging()
 
     client = SyncClient('server.sock')
     client.start()
-    mount = Mount('tmp', '/tmp')
+    mount = Mount('tmp', '/tmp/demo')
     fs = FS(client, mount)
-    fd = fs.open('/foo.txt', append=True)
-    fs.write(fd, b'hello\n')
-    fs.write(fd, b'world\n')
-
-
-if __name__ == '__main__':
-    main()

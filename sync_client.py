@@ -59,7 +59,7 @@ class SyncHandle:
         self.next_state: Optional[State] = None
 
     @contextmanager
-    def use(self, shared: bool):
+    def use(self, shared: bool = True):
         """
         Lock a handle in either shared or exclusive mode.
         """
@@ -112,6 +112,9 @@ class SyncHandle:
         assert self.user_lock.locked()
         self._release()
         self.user_lock.release()
+
+    def __repr__(self):
+        return f'<{self.key!r}: {self.data!r} ({self.state.name})>'
 
 
 class SyncClient(IpcClient):

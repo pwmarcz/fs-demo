@@ -11,7 +11,7 @@ from util import setup_logging, random_sleep
 
 
 def repeat(target, n):
-    threads = [Thread(target=target) for i in range(n)]
+    threads = [Thread(target=target, args=[i]) for i in range(n)]
     for thread in threads:
         thread.start()
 
@@ -46,11 +46,11 @@ def append(fs_: FS):
     Several clients writing to the same file in append mode.
     """
 
-    def writer():
+    def writer(c):
         with fs_.cloned() as fs:
             fd = fs.open('/log.txt', append=True)
             for i in range(10):
-                fs.write(fd, f'log line {i}\n'.encode())
+                fs.write(fd, f'client {c} log line {i}\n'.encode())
                 random_sleep()
 
     repeat(writer, 3)
@@ -66,10 +66,10 @@ def shared_handle(fs_: FS):
 
     fd = fs_.open('/log.txt')
 
-    def writer():
+    def writer(c):
         with fs_.cloned() as fs:
             for i in range(10):
-                fs.write(fd, f'log line {i}\n'.encode())
+                fs.write(fd, f'client {c} log line {i}\n'.encode())
                 random_sleep()
 
     repeat(writer, 3)
