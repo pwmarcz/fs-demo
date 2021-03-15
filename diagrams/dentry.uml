@@ -12,8 +12,8 @@ group client 1: stat("foo.txt")
     handle from the server.
   end note
 
-  c1 -> s: req_get("dentry:foo.txt", shared)
-  s -> c1: get("dentry:foo.txt", shared)
+  c1 -> s: req_up("dentry:foo.txt", shared)
+  s -> c1: up("dentry:foo.txt", shared)
   activate c1
 
 end
@@ -31,8 +31,8 @@ group client 2: stat("foo.txt")
     in shared mode.
   end note
 
-  c2 -> s: req_get("dentry:foo.txt", shared)
-  s -> c2: get("dentry:foo.txt", shared)
+  c2 -> s: req_up("dentry:foo.txt", shared)
+  s -> c2: up("dentry:foo.txt", shared)
   activate c2
 
 end
@@ -59,14 +59,15 @@ group client 1: truncate("foo.txt")
     for other clients.
   end note
 
-  c1 -> s: req_get("dentry:foo.txt", exclusive)
+  c1 -> s: req_up("dentry:foo.txt", exclusive)
   deactivate c1
 
-  s -> c2: req_put("dentry:foo.txt")
-  c2 -> s: put("dentry:foo.txt")
+  s -> c2: req_down("dentry:foo.txt", invalid)
+  c2 -> s: down("dentry:foo.txt", invalid)
   deactivate c2
 
-  s -> c1: get("dentry:foo.txt", exclusive)
+  s -> c1: up("dentry:foo.txt", exclusive)
+  activate c1
   activate c1 #ffbbbb
 
 end
@@ -80,17 +81,18 @@ end note
 
 group client 2: stat("foo.txt")
 
-  c2 -> s: req_get("dentry:foo.txt", shared)
-  s -> c1: req_put("dentry:foo.txt")
-  c1 -> s: put("dentry:foo.txt")
+  c2 -> s: req_up("dentry:foo.txt", shared)
+  s -> c1: req_down("dentry:foo.txt", shared)
+  c1 -> s: down("dentry:foo.txt", shared)
   deactivate c1
 
   note left of c1 #white
     Another client has requested the
-    handle, so we release it.
+    handle, so we downgrade it to
+    shared mode.
   end note
 
-  s -> c2: get("dentry:foo.txt", shared)
+  s -> c2: up("dentry:foo.txt", shared)
   activate c2
 
 end

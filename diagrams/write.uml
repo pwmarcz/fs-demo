@@ -13,8 +13,8 @@ group client 1: open("foo.txt")
     file handle).
   end note
 
-  c1 -> s: req_get("file:123", shared, 0)
-  s -> c1: get("file:123", shared, 0)
+  c1 -> s: req_up("file:123", shared, 0)
+  s -> c1: up("file:123", shared, 0)
   activate c1
 end
 
@@ -28,8 +28,8 @@ group client 1: fork
     the same key.
   end note
 
-  c2 -> s: req_get("file:123", shared)
-  s -> c2: get("file:123", shared)
+  c2 -> s: req_up("file:123", shared)
+  s -> c2: up("file:123", shared)
   activate c2
 end
 
@@ -47,33 +47,33 @@ group client 1: write("foo.txt"); client 2: write("foo.txt")
 
   rnote over c1: write...
 
-  c1 -> s: req_get("file:123", exclusive)
+  c1 -> s: req_up("file:123", exclusive)
   deactivate c1
-  s -> c2: req_put("file:123")
-  c2 -> s: put("file: 123", 0)
+  s -> c2: req_down("file:123")
+  c2 -> s: down("file: 123", 0)
   deactivate c2
 
   rnote over c2: write...
 
-  c2 -> s: req_get("file:123", exclusive)
+  c2 -> s: req_up("file:123", exclusive)
 
-  s -> c1: get("file:123", exclusive, 0)
+  s -> c1: up("file:123", exclusive, 0)
   activate c1 #ffbbbb
 
-  s -> c1: req_put("file:123")
+  s -> c1: req_down("file:123")
 
   rnote over c1: ...write ends
 
-  c1 -> s: put("file:123", 64)
+  c1 -> s: down("file:123", 64)
   deactivate c1
 
   note left of c1 #white
     Once the write is finished, we can
     release the exclusive handle (with
     updated position), as requested by
-    "req_put".
+    "req_down".
   end note
-  s -> c2: get("file:123", exclusive, 64)
+  s -> c2: up("file:123", exclusive, 64)
   activate c2 #ffbbbb
 
   rnote over c2: ...write ends

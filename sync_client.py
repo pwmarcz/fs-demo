@@ -22,12 +22,14 @@ Example usage:
         counter.data += 1
         counter.modified = True
 """
+from enum import Enum
 from threading import Lock
 from contextlib import contextmanager
 from threading import Condition
-from typing import Dict
+from typing import Dict, Optional
 
 from ipc import IpcClient
+from sync_server import State
 
 
 class SyncHandle:
@@ -53,9 +55,8 @@ class SyncHandle:
 
         # Protected by prop_lock
         self.used = False
-        self.valid = False
-        self.shared = False
-        self.need_put = False
+        self.state: State = State.INVALID
+        self.next_state: Optional[State] = None
 
     @contextmanager
     def use(self, shared: bool):
@@ -71,12 +72,13 @@ class SyncHandle:
                 self._release()
 
     def _acquire(self, shared: bool):
+        want_state = State.SHARED if shared else State.EXCLUSIVE
         with self.prop_lock:
             self.used = True
             # Need to reacquire if the handle is either invalid, or shared when
             # we want exclusive.
-            if not self.valid or (not shared and self.shared):
-                self.client.get(self, shared)
+            if self.state < want_state:
+                self.client.up(self, want_state)
                 return True
             return False
 
@@ -99,12 +101,12 @@ class SyncHandle:
 
     def _release(self):
         with self.prop_lock:
-            if self.modified and self.shared:
-                self.client.get(self, shared=False, update=True)
+            if self.modified and self.state == State.SHARED:
+                self.client.up(self, State.EXCLUSIVE, update=True)
             self.used = False
-            if self.need_put:
-                self.client.put(self)
-                self.need_put = False
+            if self.next_state is not None:
+                self.client.down(self, self.next_state)
+                self.next_state = None
 
     def release(self):
         assert self.user_lock.locked()
@@ -119,49 +121,50 @@ class SyncClient(IpcClient):
         self.handles: Dict[str, SyncHandle] = {}
 
         self.methods = {
-            'get': self.on_get,
-            'req_put': self.on_req_put,
+            'up': self.on_up,
+            'req_down': self.on_req_down,
         }
 
-    def get(self, handle: SyncHandle, shared: bool, update: bool = False):
+    def up(self, handle: SyncHandle, want_state: State, update: bool = False):
         assert handle.user_lock.locked()
         assert handle.prop_lock.locked()
-        if shared:
+        if want_state == State.SHARED:
             assert not update
 
         with self.lock:
             self.handles[handle.key] = handle
-        handle.valid = False
-        self.send(['req_get', handle.key, shared, handle.data, update])
+        handle.state = State.INVALID
+        self.send(['req_up', handle.key, want_state.value, handle.data, update])
         # Wait until the handle is valid, and exclusive (if requested)
-        while not (handle.valid and (shared or not handle.shared)):
+        while handle.state < want_state:
             handle.ack.wait()
 
-    def on_get(self, key, shared, data):
+    def on_up(self, key, state_val: int, data):
         with self.lock:
             handle = self.handles[key]
 
         with handle.prop_lock:
-            handle.valid = True
             handle.modified = False
             handle.data = data
-            handle.shared = shared
+            handle.state = State(state_val)
             handle.ack.notify_all()
 
-    def on_req_put(self, key):
+    def on_req_down(self, key, state_val: int):
         with self.lock:
             handle = self.handles[key]
+
+        state = State(state_val)
 
         with handle.prop_lock:
             if handle.used:
                 # If handle is being used, send it back to the server after
                 # we stop using it.
-                handle.need_put = True
+                handle.next_state = state
             else:
-                self.put(handle)
+                self.down(handle, state)
 
-    def put(self, handle):
+    def down(self, handle: SyncHandle, state: State):
         assert handle.prop_lock.locked()
-        handle.valid = False
+        handle.state = state
         handle.modified = False
-        self.send(['put', handle.key, handle.data])
+        self.send(['down', handle.key, handle.state, handle.data])

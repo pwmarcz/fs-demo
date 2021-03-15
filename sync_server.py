@@ -1,39 +1,48 @@
 """
-A server for synchronizing resources (sync handles). At a given time, a handle
-can be either
+A server for synchronizing resources (sync handles). At a given time, a client
+can hold the handle in one of three states:
 
-* shared: loaded by possibly many clients,
-* exclusive: loaded by a single client (and blocking other clients).
+* State.INVALID: unloaded,
+* State.SHARED: loaded in shared mode (possibly together with other clients),
+* State.EXLUSIVE: loaded in exclusive mode (and blocking other clients).
 
 Client messages:
 
-* ["req_get", key, shared, data, update]: The client requests resource,
-  in either shared or exclusive mode. The server will respond by "get" when the
-  resource can be used.
+* ["req_up", key, state, data, update]: The client requests to upgrade a
+  resource (to either shared or exclusive mode). The server will respond by
+  "up" when the resource can be used.
 
   If ``update`` is true, the data stored by handle will be updated. Otherwise,
   the value of ``data`` will be used only as a default. This can be used only
   in exclusive mode.
 
-* ["put", key, data]: The client stops using resource, and reports latest
-  version of data. The data will be updated only in exclusive mode.
+* ["down", key, state, data]: The client downgrades resource (to shared/invalid
+  mode), and reports latest version of data. The data will be updated only when
+  in exclusive mode.
 
 Server messages:
 
-* ["get", key, shared, data]: The client is permitted to use the resource, in
+* ["up", key, state, data]: The client is permitted to use the resource, in
   either shared or exclusive mode.
 
-* ["req_put", key]: The server requests client to to unload a resource. The
-  client should respond with "put" when ready.
+* ["req_down", key, state]: The server requests client to to downgrade a
+  resource. The client should respond with "down" when ready.
 """
 
 import os
 from dataclasses import dataclass
+from enum import Enum, IntEnum
 from threading import Lock
 import logging
 from typing import List, Any, Dict, Optional
 
 from ipc import Conn, IpcServer
+
+
+class State(IntEnum):
+    INVALID = 0
+    SHARED = 1
+    EXCLUSIVE = 2
 
 
 @dataclass
@@ -47,7 +56,7 @@ class Request:
     """
 
     conn: Conn
-    shared: bool
+    want_state: State
     data: Any
     update: bool
     started: bool
@@ -85,19 +94,20 @@ class SyncServerHandle:
         Handle a request, if possible. Returns True on success.
         """
 
-        if request.shared and not self.exclusive_conn:
+        if request.want_state == State.SHARED and not self.exclusive_conn:
             assert request.conn not in self.shared_conns
             assert not request.update
             self.shared_conns.append(request.conn)
-            request.conn.send(['get', self.key, True, self.data])
+            request.conn.send(['up', self.key, State.SHARED, self.data])
             return True
 
-        if not request.shared and not self.exclusive_conn and \
-                not self.shared_conns:
+        if (request.want_state == State.EXCLUSIVE and
+                not self.exclusive_conn and
+                not self.shared_conns):
             self.exclusive_conn = request.conn
             if request.update:
                 self.data = request.data
-            request.conn.send(['get', self.key, False, self.data])
+            request.conn.send(['up', self.key, State.EXCLUSIVE, self.data])
             return True
 
         return False
@@ -108,17 +118,19 @@ class SyncServerHandle:
         This will request other clients to drop a resource.
         """
 
-        if request.shared:
+        if request.want_state == State.SHARED:
             assert self.exclusive_conn
-            self.exclusive_conn.send(['req_put', self.key])
+            self.exclusive_conn.send(['req_down', self.key, State.SHARED])
         else:
             if self.exclusive_conn:
-                self.exclusive_conn.send(['req_put', self.key])
+                self.exclusive_conn.send(['req_down', self.key, State.INVALID])
             for conn in self.shared_conns:
-                conn.send(['req_put', self.key])
+                conn.send(['req_down', self.key, State.INVALID])
 
-    def req_get(self, conn: Conn, shared: bool, data: Any, update: bool):
-        if shared:
+    def req_up(self, conn: Conn, state: State, data: Any, update: bool):
+        assert state in [State.SHARED, State.EXCLUSIVE]
+
+        if state == State.SHARED:
             assert not update
 
         if conn in self.shared_conns:
@@ -126,15 +138,23 @@ class SyncServerHandle:
         if conn == self.exclusive_conn:
             self.exclusive_conn = None
 
-        self.requests.append(Request(conn, shared, data, update, started=False))
+        self.requests.append(Request(conn, state, data, update, started=False))
         self._handle_requests()
 
-    def put(self, conn: Conn, data: Any):
-        if conn in self.shared_conns:
-            self.shared_conns.remove(conn)
-        elif conn == self.exclusive_conn:
-            self.exclusive_conn = None
-            self.data = data
+    def down(self, conn: Conn, state: State, data: Any):
+        assert state in [State.INVALID, State.SHARED]
+
+        if state == State.INVALID:
+            if conn in self.shared_conns:
+                self.shared_conns.remove(conn)
+            elif conn == self.exclusive_conn:
+                self.exclusive_conn = None
+                self.data = data
+        else:
+            if conn == self.exclusive_conn:
+                self.exclusive_conn = None
+                self.data = data
+                self.shared_conns.append(conn)
 
         self.requests = [request for request in self.requests
                          if request.conn != conn]
@@ -146,8 +166,8 @@ class SyncServer(IpcServer):
         super().__init__(path)
 
         self.methods = {
-            'req_get': self.on_req_get,
-            'put': self.on_put,
+            'req_up': self.on_req_up,
+            'down': self.on_down,
         }
         self.lock = Lock()
         self.handles: Dict[str, SyncServerHandle] = {}
@@ -159,23 +179,23 @@ class SyncServer(IpcServer):
             self.handles[key] = SyncServerHandle(key=key, data=default_data)
         return self.handles[key]
 
-    def on_req_get(self, conn: Conn, key: str, shared: bool, data: Any,
+    def on_req_up(self, conn: Conn, key: str, state_val: int, data: Any,
                    update: bool):
         with self.lock:
             if key not in self.handles:
                 self.handles[key] = SyncServerHandle(key, data)
             handle = self.handles[key]
-            handle.req_get(conn, shared, data, update)
+            handle.req_up(conn, State(state_val), data, update)
 
-    def on_put(self, conn: Conn, key: str, data: Any):
+    def on_down(self, conn: Conn, key: str, state_val: int, data: Any):
         with self.lock:
             handle = self.handles[key]
-            handle.put(conn, data)
+            handle.down(conn, State(state_val), data)
 
     def remove_conn(self, conn: Conn):
         with self.lock:
             for key, handle in list(self.handles.items()):
-                handle.put(conn, handle.data)
+                handle.down(conn, State.INVALID, handle.data)
                 if handle.unused():
                     logging.info('server: deleting unused handle: %r, %r',
                                  handle.key, handle.data)
